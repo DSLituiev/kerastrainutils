@@ -253,3 +253,66 @@ def acc_3(y_true, y_pred):   return acc_cl(y_true, y_pred, cl=3)
 def acc_4(y_true, y_pred):   return acc_cl(y_true, y_pred, cl=4)
 
 def acc_5(y_true, y_pred):   return acc_cl(y_true, y_pred, cl=5)
+
+import tensorflow as tf
+from tensorflow.python.framework import ops
+from tensorflow.python.ops.losses.losses import compute_weighted_loss
+import keras
+from keras import backend as K
+
+def pairwise_binary_logsigmoid(
+    labels, predictions, weights=1.0, scope=None,
+    loss_collection=ops.GraphKeys.LOSSES,
+    #reduction=Reduction.SUM_BY_NONZERO_WEIGHTS
+    ):
+
+    with ops.name_scope(scope, "absolute_difference",
+                      (predictions, labels, weights)) as scope:
+        mask_pos = tf.equal(labels, 1)
+        mask_neg = tf.equal(labels, 0)
+
+        yhat_pos = tf.boolean_mask(predictions, mask_pos)
+        yhat_neg = tf.boolean_mask(predictions, mask_neg)
+
+        yhat_diff = (tf.reshape(yhat_pos, (-1,1)) -
+                     tf.reshape(yhat_neg, (1,-1))
+                    )
+
+        losses = tf.log_sigmoid(-yhat_diff)
+        print("losses",losses.dtype)
+        loss = tf.reduce_sum(losses)
+        #util.add_loss(loss, loss_collection)
+        return loss
+        """
+        return compute_weighted_loss(
+            losses, weights, scope, loss_collection,
+            #reduction=reduction
+            )
+            """
+
+
+def keras_tf_pairwise_binary_logsigmoid(
+    labels, predictions, weights=1.0, scope=None,
+    loss_collection=ops.GraphKeys.LOSSES,
+    #reduction=Reduction.SUM_BY_NONZERO_WEIGHTS
+    ):
+
+    with ops.name_scope(scope, "absolute_difference",
+                      (predictions, labels, weights)) as scope:
+        mask_pos = K.equal(labels, 1)
+        mask_neg = K.equal(labels, 0)
+
+        yhat_pos = K.tf.boolean_mask(predictions, mask_pos)
+        yhat_neg = K.tf.boolean_mask(predictions, mask_neg)
+
+        score_diff = (K.reshape(yhat_pos, (-1,1)) -
+                     K.reshape(yhat_neg, (1,-1))
+                    )
+
+        #losses = K.tf.log_sigmoid(-yhat_diff)
+        losses = -K.softplus(score_diff)
+        print("losses",losses.dtype)
+        return  K.sum(losses*weights) #K.tf.reduce_sum(losses)
+
+
+
