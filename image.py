@@ -19,15 +19,13 @@ from functools import partial
 
 from keras import backend as K
 from keras.utils.data_utils import Sequence
-from iterator_oversampling import Iterator
 
-from histeq import histeq, ztransform
-from noise import add_blurred_noise, add_noise
-
+from histeq import histeq
 try:
     from PIL import Image as pil_image
 except ImportError:
     pil_image = None
+import cv2
 
 
 def random_rotation(x, rg, row_axis=1, col_axis=2, channel_axis=0,
@@ -201,18 +199,28 @@ def apply_transform(x,
     # Returns
         The transformed version of the input.
     """
-    x = np.rollaxis(x, channel_axis, 0)
     final_affine_matrix = transform_matrix[:2, :2]
     final_offset = transform_matrix[:2, 2]
-    channel_images = [ndi.interpolation.affine_transform(
-        x_channel,
-        final_affine_matrix,
-        final_offset,
-        order=0,
-        mode=fill_mode,
-        cval=cval) for x_channel in x]
-    x = np.stack(channel_images, axis=0)
-    x = np.rollaxis(x, 0, channel_axis + 1)
+
+    if len(x.shape)>2 and channel_axis is not None:
+        x = np.rollaxis(x, channel_axis, 0)
+        channel_images = [ndi.interpolation.affine_transform(
+            x_channel,
+            final_affine_matrix,
+            final_offset,
+            order=0,
+            mode=fill_mode,
+            cval=cval) for x_channel in x]
+        x = np.stack(channel_images, axis=0)
+        x = np.rollaxis(x, 0, channel_axis + 1)
+    else:
+        x = ndi.interpolation.affine_transform(
+            x,
+            final_affine_matrix,
+            final_offset,
+            order=0,
+            mode=fill_mode,
+            cval=cval)
     return x
 
 
@@ -273,7 +281,7 @@ def array_to_img(x, data_format=None, scale=True):
         raise ValueError('Unsupported channel number: ', x.shape[2])
 
 
-def img_to_array(img, data_format=None, grayscale=False):
+def img_to_array(img, data_format=None):
     """Converts a PIL Image instance to a Numpy array.
 
     # Arguments
@@ -294,23 +302,20 @@ def img_to_array(img, data_format=None, grayscale=False):
     # or (channel, height, width)
     # but original PIL image has format (width, height, channel)
     x = np.asarray(img, dtype=K.floatx())
-    if len(x.shape) ==2:
-        x = x.reshape((x.shape[0], x.shape[1], 1))
-
-    if x.shape[-1] == 1 and not grayscale:
-        x = np.stack([x[...,0]]*3, axis=2)
-    elif x.shape[-1] > 1 and grayscale:
-        x = np.mean(x, axis=-1)[...,np.newaxis]
-
     if len(x.shape) == 3:
         if data_format == 'channels_first':
             x = x.transpose(2, 0, 1)
+    elif len(x.shape) == 2:
+        if data_format == 'channels_first':
+            x = x.reshape((1, x.shape[0], x.shape[1]))
+        else:
+            x = x.reshape((x.shape[0], x.shape[1], 1))
     else:
         raise ValueError('Unsupported image shape: ', x.shape)
     return x
 
 
-def load_img(path, grayscale=False, target_size=None, convert=False):
+def load_img(path, grayscale=False, target_size=None):
     """Loads an image into PIL format.
 
     # Arguments
@@ -329,6 +334,12 @@ def load_img(path, grayscale=False, target_size=None, convert=False):
         raise ImportError('Could not import PIL.Image. '
                           'The use of `array_to_img` requires PIL.')
     img = pil_image.open(path)
+    if grayscale:
+        if img.mode != 'L':
+            img = img.convert('L')
+    else:
+        if img.mode != 'RGB':
+            img = img.convert('RGB')
     if target_size:
         hw_tuple = (target_size[1], target_size[0])
         if img.size != hw_tuple:
@@ -337,15 +348,6 @@ def load_img(path, grayscale=False, target_size=None, convert=False):
             except OSError as ee:
                 print("on resizing to %s\t%s" % (str(hw_tuple), path), file=sys.stderr)
                 raise ee
-
-    if convert:
-        if grayscale:
-            if img.mode != 'L':
-                img = img.convert('L')
-        else:
-            if img.mode != 'RGB':
-                #print("conversion to RGB", img.getextrema())
-                img = img.convert('RGB')
     return img
 
 
@@ -417,12 +419,7 @@ class ImageDataGenerator(object):
                  preprocessing_function=None,
                  postprocessing_function=None,
                  histeq_alpha = False,
-                 contrast_exp = 1.2,
-                 contrast = None,
-                 truncate_quantile = None,
-                 z_transform = None,
-                 data_format=None,
-                 noise=None):
+                 data_format=None):
         if data_format is None:
             data_format = K.image_data_format()
         self.featurewise_center = featurewise_center
@@ -443,20 +440,6 @@ class ImageDataGenerator(object):
         self.vertical_flip = vertical_flip
         self.rescale = rescale
         self.histeq_alpha = histeq_alpha
-        self.contrast = contrast
-        self.contrast_exp = contrast_exp
-        self.ztransform = z_transform
-        self.truncate_quantile = truncate_quantile
-        self.noise_specs = {} if noise is None else noise
-
-        if self.contrast is not None:
-            if self.contrast<1:
-                self.contrast_range = [self.contrast, 1/self.contrast]
-            else:
-                self.contrast_range = [1/self.contrast, self.contrast]
-        else:
-            self.contrast_range = None
-
         #self.intensity_gain = intensity_gain
 
         self.preprocessing_function = preprocessing_function
@@ -513,7 +496,8 @@ class ImageDataGenerator(object):
                             follow_links=False,
                             stratify=None,
                             oversampling=False,
-                            sampling_factor=None,
+                            subsample_factor= None,
+                            subsample_num = None,
                             ):
         return DirectoryIterator(
             directory, self,
@@ -528,8 +512,42 @@ class ImageDataGenerator(object):
             follow_links=follow_links,
             stratify=stratify,
             oversampling=oversampling,
-            sampling_factor=sampling_factor,
+            subsample_factor=subsample_factor,
+            subsample_num=subsample_num,
             )
+
+
+    def flow_patches(self, fn_img, fn_pnt,
+                             point_sampler,
+                            target_size=(256, 256),
+                            color_mode='grayscale',
+                            batch_size=4,
+                            patches_per_image=1,
+                            shuffle=True,
+                            seed=0,
+                            dtype='uint16',
+                            fill_mode = 'reflect',
+                            label_freq={1:5, 2:10}, 
+                            postprocessing_functions = [None, None],
+                            output_indices=False,
+                            ):
+
+        return PatchIterator(fn_img, fn_pnt,
+                 point_sampler,
+                 image_data_generator = self,
+                 batch_size=batch_size,
+                 patches_per_image=patches_per_image,
+                 shuffle=shuffle,
+                 color_mode=color_mode,
+                 seed=seed,
+                 patch_size = target_size,
+                 dtype=dtype,
+                 mode = self.fill_mode if fill_mode is None else fill_mode,
+                 label_freq=label_freq, 
+                 augmentation=True,
+                 postprocessing_functions=postprocessing_functions,
+                 output_indices=output_indices,
+                 )
 
     def standardize(self, x):
         """Apply the normalization configuration to a batch of inputs.
@@ -540,16 +558,6 @@ class ImageDataGenerator(object):
         # Returns
             The inputs, normalized.
         """
-        if self.preprocessing_function:
-            x = self.preprocessing_function(x)
-        if self.rescale is not None:
-            if hasattr(self.rescale, '__len__'):
-                for ii, rr in enumerate(self.rescale):
-                    if rr is not None:
-                        x[:,:,ii] = rr*x[:,:,ii]
-            else:
-                x *= self.rescale
-
         if self.histeq_alpha:
             alpha=np.random.random()
             if hasattr(self.histeq_alpha, '__len__'):
@@ -559,17 +567,15 @@ class ImageDataGenerator(object):
                         x[:,:,ii] = histeq(x[:,:,ii], bitdepth=16, mask=None, alpha=alpha)
             else:
                 x = histeq(x, bitdepth=16, mask=None, alpha=alpha)
-        if self.ztransform:
-            mask = x>0
-            mask &= x<x.max()
-            if self.contrast_range:
-                contrast = np.clip(self.contrast_exp ** np.random.normal(0,1),
-                                   *self.contrast_range)
+        if self.preprocessing_function:
+            x = self.preprocessing_function(x)
+        if self.rescale is not None:
+            if hasattr(self.rescale, '__len__'):
+                for ii, rr in enumerate(self.rescale):
+                    if rr is not None:
+                        x[:,:,ii] = rr*x[:,:,ii]
             else:
-                contrast = None
-            x = ztransform(x, mask=None, contrast=contrast, 
-                           truncate_quantile=self.truncate_quantile)
-
+                x *= self.rescale
         # x is a single image, so it doesn't have image number at index 0
         img_channel_axis = self.channel_axis - 1
         if self.samplewise_center:
@@ -605,7 +611,8 @@ class ImageDataGenerator(object):
                               'first by calling `.fit(numpy_data)`.')
         return x
 
-    def random_transform(self, x, seed=None):
+    
+    def get_geom_transform(self, nrows, ncols, seed=None):
         """Randomly augment a single image tensor.
 
         # Arguments
@@ -615,19 +622,9 @@ class ImageDataGenerator(object):
         # Returns
             A randomly transformed version of the input (same shape).
         """
-        # x is a single image, so it doesn't have image number at index 0
-        img_row_axis = self.row_axis - 1
-        img_col_axis = self.col_axis - 1
-        img_channel_axis = self.channel_axis - 1
 
         if seed is not None:
             np.random.seed(seed)
-
-        if len(self.noise_specs)>0:
-            if "blur_sigma" in self.noise_specs:
-                x = add_blurred_noise(x, **self.noise_specs)
-            else:
-                x = add_noise(x, **self.noise_specs)
 
         # use composition of homographies
         # to generate final transform that needs to be applied
@@ -637,12 +634,12 @@ class ImageDataGenerator(object):
             theta = 0
 
         if self.height_shift_range:
-            tx = np.random.uniform(-self.height_shift_range, self.height_shift_range) * x.shape[img_row_axis]
+            tx = np.random.uniform(-self.height_shift_range, self.height_shift_range) * nrows 
         else:
             tx = 0
 
         if self.width_shift_range:
-            ty = np.random.uniform(-self.width_shift_range, self.width_shift_range) * x.shape[img_col_axis]
+            ty = np.random.uniform(-self.width_shift_range, self.width_shift_range) * ncols
         else:
             ty = 0
 
@@ -682,11 +679,23 @@ class ImageDataGenerator(object):
             transform_matrix = zoom_matrix if transform_matrix is None else np.dot(transform_matrix, zoom_matrix)
 
         if transform_matrix is not None:
-            h, w = x.shape[img_row_axis], x.shape[img_col_axis]
-            transform_matrix = transform_matrix_offset_center(transform_matrix, h, w)
+            transform_matrix = transform_matrix_offset_center(transform_matrix, nrows, ncols)
+        return transform_matrix
+
+    def random_transform(self, x, seed=None):
+
+        # x is a single image, so it doesn't have image number at index 0
+        img_row_axis = self.row_axis - 1
+        img_col_axis = self.col_axis - 1
+        img_channel_axis = self.channel_axis - 1
+        nrows = x.shape[img_row_axis]
+        ncols = x.shape[img_col_axis]
+
+        transform_matrix = self.get_geom_transform(nrows, ncols, seed=seed)
+        
+        if transform_matrix is not None:
             x = apply_transform(x, transform_matrix, img_channel_axis,
                                 fill_mode=self.fill_mode, cval=self.cval)
-
         if self.channel_shift_range != 0:
             x = random_channel_shift(x,
                                      self.channel_shift_range,
@@ -767,6 +776,141 @@ class ImageDataGenerator(object):
             u, s, _ = linalg.svd(sigma)
             self.principal_components = np.dot(np.dot(u, np.diag(1. / np.sqrt(s + self.zca_epsilon))), u.T)
 
+
+class Iterator(Sequence):
+    """Abstract base class for image data iterators.
+
+    # Arguments
+        n: Integer, total number of samples in the dataset to loop over.
+        batch_size:  Integer, size of a batch.
+        shuffle:     Boolean, whether to shuffle the data between epochs.
+        seed:        Random seeding for data shuffling.
+        stratify:    Label to stratify by
+        oversampling: Oversample if stratification label is provided to match the multiples of the largest class
+    """
+
+    def __init__(self, n, batch_size, shuffle, seed,
+            postprocessing_function=None, stratify=None, oversampling=True,
+            subsample_factor=None,
+            subsample_num=None,
+            ):
+        self.stratify = stratify
+        self.oversampling = oversampling
+        self.n = n
+        self.batch_size = batch_size
+        self.seed = seed
+        self.shuffle = shuffle
+        self.batch_index = 0
+        self.total_batches_seen = 0
+        self.lock = threading.Lock()
+        self.index_array = None
+        self.postprocessing_function = postprocessing_function
+        self.index_generator = self._flow_index()
+        self.final_num = self.n
+        if self.stratify is not None:
+            self._prep_stratified()
+            if self.oversampling:
+                self.final_num = sum(self.class_size>0) * max(self.class_size)
+        elif (subsample_factor is not None) or (subsample_num is not None):
+            if subsample_num is None:
+                self.final_num = int(self.n/subsample_factor)
+            else:
+                print("subsample_num", subsample_num)
+                self.final_num = subsample_num
+            self.orig_index_array = np.random.randint(0, self.n, size=self.final_num)
+        else:
+            self.orig_index_array = np.arange(self.n)
+
+    def _prep_stratified(self):
+        self.uniq_classes = np.unique(self.stratify)
+        self.class_size = np.bincount(self.stratify)
+        
+        self.class_inds = {}
+        for cc in self.uniq_classes:
+            mask = self.stratify == cc
+            self.class_inds[cc] = np.where(mask)[0]
+
+        ex_per_class = max(self.class_size)
+        self.orig_index_array = []
+        for cc,ss in enumerate(self.class_size):
+                if ss==0:
+                    continue
+                self.orig_index_array.append(
+                    np.random.choice(self.class_inds[cc],
+                                    size=ex_per_class,
+                                    replace=ss<ex_per_class)
+                                )
+#         np.random.permutation(self.n)
+        self.orig_index_array = np.stack(self.orig_index_array).T.ravel()
+            
+    def _set_index_array(self):
+        self.index_array = self.orig_index_array.copy()
+        if self.shuffle:
+            if self.stratify is not None and not self.oversampling:
+                self.index_array = np.random.choice(self.orig_index_array.copy(),
+                                                    size=self.final_num, replace=False)
+            else:
+                self.index_array = np.random.permutation(self.orig_index_array.copy())
+            
+    def __getitem__(self, idx):
+        if idx >= len(self):
+            raise ValueError('Asked to retrieve element {idx}, '
+                             'but the Sequence '
+                             'has length {length}'.format(idx=idx,
+                                                          length=len(self)))
+        if self.seed is not None:
+            np.random.seed(self.seed + self.total_batches_seen)
+        self.total_batches_seen += 1
+        if self.index_array is None:
+            self._set_index_array()
+        index_array = self.index_array[self.batch_size * idx:
+                                       self.batch_size * (idx + 1)]
+        return self._get_batches_of_transformed_samples(index_array)
+
+    def __len__(self):
+        if hasattr(self, "batch_rate"):
+            _batch_size = self.batch_size // self.batch_rate
+        else:
+            _batch_size = self.batch_size
+        return int(np.ceil(self.n / float(_batch_size)))
+
+    def on_epoch_end(self):
+        self._set_index_array()
+
+    def reset(self):
+        self.batch_index = 0
+        
+    def _flow_index(self):
+        # Ensure self.batch_index is 0.
+        self.reset()
+        if hasattr(self, "batch_rate"):
+            _batch_size = self.batch_size // self.batch_rate
+        else:
+            _batch_size = self.batch_size
+
+        while 1:
+            if self.seed is not None:
+                np.random.seed(self.seed + self.total_batches_seen)
+            if self.batch_index == 0:
+                self._set_index_array()
+
+            current_index = (self.batch_index * _batch_size) % self.final_num
+            if self.n > current_index + self.batch_size:
+                self.batch_index += 1
+            else:
+                self.batch_index = 0
+                print("new epoch")
+            self.total_batches_seen += 1
+            yield self.index_array[current_index:
+                                   current_index + _batch_size]
+
+    def __iter__(self):
+        # Needed if we want to do something like:
+        # for x, y in data_gen.flow(...):
+        return self
+
+    def __next__(self, *args, **kwargs):
+        return self.next(*args, **kwargs)
 
 
 class NumpyArrayIterator(Iterator):
@@ -865,6 +1009,8 @@ class NumpyArrayIterator(Iterator):
                 batch_x = np.stack([ batch_x ]*3, axis=-1)
             if batch_x.shape[self.channels_axis]==1:
                 batch_x = np.concatenate([ batch_x ]*3, axis=3)
+            #print("batch_x", batch_x.shape)
+            #raise Exception("test!!!")
         if self.postprocessing_function is not None:
             batch_x = self.postprocessing_function(batch_x)
 
@@ -981,7 +1127,6 @@ class DirectoryIterator(Iterator):
         batch_size: Integer, size of a batch.
         shuffle: Boolean, whether to shuffle the data between epochs.
         seed: Random seed for data shuffling.
-        stratify: whether to stratify by the class label (None)
         data_format: String, one of `channels_first`, `channels_last`.
         save_to_dir: Optional directory where to save the pictures
             being yielded, in a viewable format. This is useful
@@ -1001,15 +1146,19 @@ class DirectoryIterator(Iterator):
                  save_to_dir=None, save_prefix='', save_format='png',
                  postprocessing_function=None,
                  follow_links=False,
-                 sampling_factor=None,
-                 stratify=None, oversampling=False):
+                 stratify=None, oversampling=True,
+                 subsample_factor= None,
+                 subsample_num = None,
+                 output_filenames=None,
+                 ):
+
+        self.output_filenames=output_filenames
         #self.postprocessing_function = postprocessing_function
         if data_format is None:
             data_format = K.image_data_format()
         self.directory = directory
         self.image_data_generator = image_data_generator
         self.target_size = tuple(target_size)
-        color_mode = color_mode.lower()
         if color_mode not in {'rgb', 'grayscale'}:
             raise ValueError('Invalid color mode:', color_mode,
                              '; expected "rgb" or "grayscale".')
@@ -1079,22 +1228,22 @@ class DirectoryIterator(Iterator):
         pool.join()
         super(DirectoryIterator, self).__init__(self.samples, batch_size, shuffle, seed, 
                 stratify=self.classes if stratify else None, oversampling=oversampling,
-                sampling_factor=sampling_factor,
+                subsample_factor=subsample_factor,
+                subsample_num=subsample_num,
                 postprocessing_function=postprocessing_function)
 
     def _get_batches_of_transformed_samples(self, index_array):
         batch_x = np.zeros((len(index_array),) + self.image_shape, dtype=K.floatx())
+        batch_fn = []
         grayscale = self.color_mode == 'grayscale'
         # build batch of image data
         for i, j in enumerate(index_array):
             fname = self.filenames[j]
+            batch_fn.append(fname)
             img = load_img(os.path.join(self.directory, fname),
                            grayscale=grayscale,
                            target_size=self.target_size)
-            x = img_to_array(img, data_format=self.data_format, grayscale=grayscale)
-            #if x.min() >= 255.0:
-            #    print(x.min(), np.median(x.ravel()), np.mean(x.ravel()),  x.max(), sep='\t')
-            #    print("high minimal value", x.min(), os.path.join(self.directory, fname))
+            x = img_to_array(img, data_format=self.data_format)
             x = self.image_data_generator.random_transform(x)
             x = self.image_data_generator.standardize(x)
             batch_x[i] = x
@@ -1122,6 +1271,8 @@ class DirectoryIterator(Iterator):
                 batch_y[i, label] = 1.
         else:
             return batch_x
+        if self.output_filenames:
+            return batch_x, batch_y, batch_fn
         return batch_x, batch_y
 
     def next(self):
@@ -1135,3 +1286,222 @@ class DirectoryIterator(Iterator):
         # The transformation of images is not under thread lock
         # so it can be done in parallel
         return self._get_batches_of_transformed_samples(index_array)
+
+# coding: utf-8
+#from keras.utils.data_utils import Sequence
+#import numpy as np
+from numpy.lib.format import open_memmap
+def get_slice(center, size=(256,256),
+              target_size = (None, None),
+              reflect = False,
+              ):
+    size = np.asarray(size)
+    xy = np.asarray(center) - size//2
+    end = xy + size
+    
+    margins_max = []
+    margins_min = []
+    slice_ = []
+    for s_, e_, t_, sz in zip(xy, end, target_size, size):
+        if t_:
+            m_e = max(0, -(t_ - e_ ))
+            e_ = min(e_, t_)
+        else:
+            m_e = None
+        m_s = max(0, -s_)
+        s_ = max(s_,0)
+        if reflect and (m_s>0) or (m_e>0):
+            #print("before", s_,e_, m_s, m_e)
+            if (e_==0) and m_e > sz//2:
+                m_e, s_ = t_-s_, t_ - m_e
+            if (s_==0) and (m_e> e_):
+                e_, m_s = m_s, e_
+            #print("after", s_,e_, m_s, m_e)
+        margins_max.append(m_e)
+        margins_min.append(m_s)
+        slice_.append(slice(s_, e_))
+    return slice_, list(zip(margins_min, margins_max))
+
+
+def pad_patch(img, slc, padseq):
+    """if no padding required, returns a slice (pointer);
+    otherwise returns a padded copy of a slice
+    
+    INPUT:
+    - target_size  [ width, height ]
+    """
+    if any((s > 0 for s in padseq[0])) | any((s > 0 for s in padseq[1])):
+        patch = np.pad(img[slc], padseq, mode='constant')
+    else:
+        patch = img[slc]
+    return patch
+
+class PatchIterator(Iterator):
+    """
+       point_sampler(filename, label=2)
+    """
+    def __init__(self, fn_img, fn_pnt,
+                 point_sampler,
+                 image_data_generator = None,
+                 batch_size = 4,
+                 shuffle=True,
+                 seed=0,
+                 patch_size = (512,512),
+                 dtype='uint16',
+                 mode = 'reflect',
+                 label_freq={1:5, 2:10}, 
+                 augmentation=None,
+                 postprocessing_functions = [None, None],
+                 color_mode = None,
+                 output_indices = False,
+                 patches_per_image = 1,
+                 ):
+        self.fn_img = fn_img
+        self.fn_pnt = fn_pnt
+        assert batch_size % patches_per_image == 0, (
+            "batch_size must be multiple of patches_per_image")
+        self.patches_per_image = patches_per_image
+        self.batch_rate = self.patches_per_image
+        self.imgs_per_batch = batch_size // self.patches_per_image
+        assert len(fn_img)  == len(fn_pnt)
+        assert len(fn_img) >0
+        print("%d images supplied" % len(fn_img))
+        self.point_sampler = point_sampler
+        nsamples = len(self.fn_img)
+        self.mode = mode
+        self.postprocessing_functions = postprocessing_functions
+        self.color_mode=color_mode
+        self._reflect = self.mode == 'reflect'
+        self.augmentation = augmentation
+        self.image_data_generator = image_data_generator
+        self.transforms = []
+        self.output_indices = output_indices
+        if self.image_data_generator is not None:
+            self.transforms.append( self.image_data_generator.random_transform )
+            self.transforms.append( self.image_data_generator.standardize )
+        
+        _norm_const = sum(label_freq.values())
+        #print(_norm_const)
+        self.patch_size = tuple(patch_size)
+        self.dtype = dtype
+        self.label_freq_dict = {kk:vv/_norm_const for kk,vv in label_freq.items()}
+        self.labels = np.asarray(list(self.label_freq_dict.keys()))
+        self.label_freq = list(self.label_freq_dict.values())
+        self.label_cum_freq = np.cumsum(self.label_freq)
+
+        self.index_generator = self._flow_index()
+        super(PatchIterator, self).__init__(nsamples, batch_size, shuffle, seed,
+#                                                 stratify=stratify, oversampling=oversampling,
+#                                                 postprocessing_function=postprocessing_function
+                                                )
+    def sample_label(self, batch_size=None):
+        if batch_size == None:
+            batch_size = self.batch_size
+        matr = np.random.rand(batch_size, self.label_cum_freq.shape[0])>= self.label_cum_freq
+        label_inds = np.argmin(matr, axis=1)
+        return np.asarray([self.labels[x] for x in label_inds])
+        
+    def init_indices():
+        self.indices = np.random.randint(len(self.fn_img))
+        
+    def open_npy(self):
+        for ff in self.fn_img:
+            img = open_memmap(ff,  dtype=np.uint16, mode='r', shape=target_size[::-1])
+            
+    def sample_points(self, index, labels):
+        fm = self.fn_pnt[index]
+        try:
+            samplegen = self.point_sampler(fm, labels)
+            for pt, label in zip(samplegen, labels):
+                yield (label, pt) 
+            #pt = mzl.point(fm, buf=None, label=2, position=-1)
+        except OSError as ee:
+            print("error on ", fm)
+            raise ee
+
+    def sample_img(self, img, pt, buffer=None, extend_dim=False, transforms=[]):
+        shape = img.shape
+        slc, padseq = get_slice(pt, size=self.patch_size, target_size=shape, reflect= self._reflect)
+        if buffer is None:
+            patch = pad_patch(img, slc, padseq)
+            return patch
+        else:
+            if self.mode == 'constant':
+                outslc = [slice(ss.start-ss.start, ss.stop-ss.start) for ss in slc]
+                if extend_dim:
+                    outslc += [0]
+                buffer[outslc] = img[slc]
+            else:
+                outslc = [slice(None)]*len(slc)
+                if extend_dim:
+                    outslc += [0]
+                buffer[outslc] = np.pad(img[slc], padseq, self.mode)#[:,:]
+            if self.augmentation and len(transforms)>0:
+                for tt in transforms:
+                    if buffer is None:
+                        print(fi, pt, tt)
+                    buffer = tt(buffer)
+    
+    def _get_batches_of_transformed_samples(self, sample_inds):
+        if sample_inds is None:
+            with self.lock:
+                sample_inds = next(self.index_generator)
+        # Repeat each image index
+        # sample_inds = list(itertools.chain.from_iterable(itertools.repeat(x, self.imgs_per_batch) for x in sample_inds))
+        #batch_class_inds = self.sample_label()
+        pts = np.zeros((self.batch_size, 2), dtype='uint16') 
+        slices = [None, slice(None), slice(None)]
+        if self.color_mode is None:
+            extend_dim = False
+            buffer = np.zeros((self.batch_size, ) + self.patch_size, dtype= self.dtype)
+        elif self.color_mode in ('grayscale', 'greyscale', 1):
+            extend_dim = True 
+            buffer = np.zeros((self.batch_size, ) + self.patch_size + (1,), dtype= self.dtype)
+        else:
+            raise ValueError("`color_mode` should be None or 'grayscale'")
+
+        batch_class_inds = np.zeros(self.batch_size, dtype='uint16')
+        print("batch_class_inds", batch_class_inds.shape)
+        print("sample_inds", len(sample_inds))
+        for nn, (ss) in enumerate(sample_inds):
+            labels = self.sample_label(self.patches_per_image)
+            lbl_slice = slice(self.patches_per_image*nn, self.patches_per_image*(nn+1))
+            print("lbl_slice", lbl_slice, len(labels))
+            batch_class_inds[lbl_slice] = labels
+            points = self.sample_points(ss, labels)
+            img = open_memmap(self.fn_img[ss],  mode='r',)
+            for jj, (lbl, pt) in enumerate(points):
+                #range(self.patches_per_image):
+                #print("nn", nn, "jj", jj, "pt",  pt)
+                pts[jj, :] = pt
+                slices[0] = nn * self.patches_per_image + jj
+                #print("buffer size", buffer.shape)
+                #print("slice", slices[0])
+                self.sample_img(img, pt, buffer[slices],
+                                transforms=self.transforms,
+                                extend_dim=extend_dim)
+            
+        output = [buffer, batch_class_inds]
+        if self.output_indices:
+            output.append(sample_inds)
+            output.append(pts)
+
+        for ii, (dd, ff) in enumerate(zip(output, self.postprocessing_functions)):
+            # print(ii, ff)
+            if ff is not None:
+                output[ii] = ff(dd)
+        return output #, pts
+
+#         pool = multiprocessing.pool.ThreadPool()
+    
+    def next(self):
+        """For python 2.x.
+
+        # Returns
+            The next batch.
+        """
+        with self.lock:
+            index_array = next(self.index_generator)
+        # The transformation of images is not under thread lock
+        # so it can be done in parallel
+        return self._get_batches_of_transformed_samples(index_array)#import threading
