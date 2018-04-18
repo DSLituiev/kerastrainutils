@@ -17,7 +17,11 @@ from keras import backend as K
 from hashlib import md5
 import json
 import yaml
-import pyaml
+try:
+    import pyaml
+except:
+    print("no `pyaml` module found. Using `yaml` instead", file=sys.stderr)
+
 
 def freezer(model, base_trainable=True, freezefirstblocks=None):
     # first: train only the top layers (which were randomly initialized)
