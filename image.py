@@ -793,8 +793,10 @@ class Iterator(Sequence):
             postprocessing_function=None, stratify=None, oversampling=True,
             subsample_factor=None,
             subsample_num=None,
+            batch_rate=1,
             ):
         self.stratify = stratify
+        self.batch_rate = batch_rate
         self.oversampling = oversampling
         self.n = n
         self.batch_size = batch_size
@@ -863,8 +865,9 @@ class Iterator(Sequence):
         self.total_batches_seen += 1
         if self.index_array is None:
             self._set_index_array()
-        index_array = self.index_array[self.batch_size * idx:
-                                       self.batch_size * (idx + 1)]
+        _batch_size = self.batch_size // self.batch_rate
+        index_array = self.index_array[_batch_size * idx:
+                                       _batch_size * (idx + 1)]
         return self._get_batches_of_transformed_samples(index_array)
 
     def __len__(self):
@@ -900,6 +903,7 @@ class Iterator(Sequence):
             else:
                 self.batch_index = 0
                 print("new epoch")
+            self.batch_index = self.total_batches_seen % self.__len__()
             self.total_batches_seen += 1
             yield self.index_array[current_index:
                                    current_index + _batch_size]
@@ -985,6 +989,8 @@ class NumpyArrayIterator(Iterator):
 
 
     def _get_batches_of_transformed_samples(self, index_array):
+        print("self.batch_index", self.batch_index,)
+        print("===", index_array)
         batch_x = np.zeros(tuple([len(index_array)] + list(self.x.shape)[1:]),
                            dtype=K.floatx())
         if len(batch_x.shape)==3:
@@ -1361,7 +1367,6 @@ class PatchIterator(Iterator):
         assert batch_size % patches_per_image == 0, (
             "batch_size must be multiple of patches_per_image")
         self.patches_per_image = patches_per_image
-        self.batch_rate = self.patches_per_image
         self.imgs_per_batch = batch_size // self.patches_per_image
         assert len(fn_img)  == len(fn_pnt)
         assert len(fn_img) >0
@@ -1391,6 +1396,7 @@ class PatchIterator(Iterator):
 
         self.index_generator = self._flow_index()
         super(PatchIterator, self).__init__(nsamples, batch_size, shuffle, seed,
+                                            batch_rate = patches_per_image,
 #                                                 stratify=stratify, oversampling=oversampling,
 #                                                 postprocessing_function=postprocessing_function
                                                 )
@@ -1440,7 +1446,8 @@ class PatchIterator(Iterator):
                 for tt in transforms:
                     if buffer is None:
                         print(fi, pt, tt)
-                    buffer = tt(buffer)
+                    buffer[:] = tt(buffer.copy())[:]
+                #print("finally after rescale", buffer.max())
     
     def _get_batches_of_transformed_samples(self, sample_inds):
         if sample_inds is None:
@@ -1449,24 +1456,22 @@ class PatchIterator(Iterator):
         # Repeat each image index
         # sample_inds = list(itertools.chain.from_iterable(itertools.repeat(x, self.imgs_per_batch) for x in sample_inds))
         #batch_class_inds = self.sample_label()
-        pts = np.zeros((self.batch_size, 2), dtype='uint16') 
+        curr_batch_size = len(sample_inds) * self.patches_per_image
+        pts = np.zeros((curr_batch_size, 2), dtype='uint16') 
         slices = [None, slice(None), slice(None)]
         if self.color_mode is None:
             extend_dim = False
-            buffer = np.zeros((self.batch_size, ) + self.patch_size, dtype= self.dtype)
+            buffer = np.zeros((curr_batch_size, ) + self.patch_size, dtype= self.dtype)
         elif self.color_mode in ('grayscale', 'greyscale', 1):
             extend_dim = True 
-            buffer = np.zeros((self.batch_size, ) + self.patch_size + (1,), dtype= self.dtype)
+            buffer = np.zeros((curr_batch_size, ) + self.patch_size + (1,), dtype= self.dtype)
         else:
             raise ValueError("`color_mode` should be None or 'grayscale'")
 
-        batch_class_inds = np.zeros(self.batch_size, dtype='uint16')
-        print("batch_class_inds", batch_class_inds.shape)
-        print("sample_inds", len(sample_inds))
+        batch_class_inds = np.zeros(curr_batch_size, dtype='uint16')
         for nn, (ss) in enumerate(sample_inds):
             labels = self.sample_label(self.patches_per_image)
             lbl_slice = slice(self.patches_per_image*nn, self.patches_per_image*(nn+1))
-            print("lbl_slice", lbl_slice, len(labels))
             batch_class_inds[lbl_slice] = labels
             points = self.sample_points(ss, labels)
             img = open_memmap(self.fn_img[ss],  mode='r',)
