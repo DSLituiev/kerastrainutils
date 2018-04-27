@@ -518,19 +518,19 @@ class ImageDataGenerator(object):
 
 
     def flow_patches(self, fn_img, fn_pnt,
-                             point_sampler,
-                            target_size=(256, 256),
-                            color_mode='grayscale',
-                            batch_size=4,
-                            patches_per_image=1,
-                            shuffle=True,
-                            seed=0,
-                            dtype='uint16',
-                            fill_mode = 'reflect',
-                            label_freq={1:5, 2:10}, 
-                            postprocessing_functions = [None, None],
-                            output_indices=False,
-                            ):
+                     point_sampler,
+                     target_size=(256, 256),
+                     color_mode='grayscale',
+                     batch_size=4,
+                     patches_per_image=1,
+                     shuffle=True,
+                     seed=0,
+                     dtype='uint16',
+                     fill_mode = 'reflect',
+                     label_freq={1:5, 2:10}, 
+                     postprocessing_functions = [None, None],
+                     output_indices=False,
+                     ):
 
         return PatchIterator(fn_img, fn_pnt,
                  point_sampler,
@@ -549,6 +549,42 @@ class ImageDataGenerator(object):
                  output_indices=output_indices,
                  )
 
+    def flow_memmap(self,
+                    root_dir, csv_file,
+                    classes = ["Control", "Case",],
+                    binary=True,
+                    postprocessing_functions=None,
+                    nsamples = None,
+                    batch_size = 1,
+                    shuffle = False,
+                    seed = None,
+                    postprocessing_function=None,
+                    stratify=None,
+                    oversampling=True,
+                    subsample_factor=None,
+                    subsample_num=None,
+                    batch_rate=1,
+                    dtype = K.floatx(),
+                    color_mode=None,
+                    ):
+        return MemMapIterator(root_dir, csv_file,
+                 classes = classes,
+                 image_data_generator = self,
+                 data_format = self.data_format,
+                 binary=binary,
+                 transform=postprocessing_functions,
+                 nsamples = None,
+                 batch_size = batch_size,
+                 shuffle = shuffle,
+                 seed = seed,
+                 stratify=stratify,
+                 oversampling=oversampling,
+                 subsample_factor=subsample_factor,
+                 subsample_num=subsample_num,
+                 batch_rate=batch_rate,
+                 dtype = dtype,
+                 color_mode=color_mode,
+                 )
     def standardize(self, x):
         """Apply the normalization configuration to a batch of inputs.
 
@@ -575,6 +611,8 @@ class ImageDataGenerator(object):
                     if rr is not None:
                         x[:,:,ii] = rr*x[:,:,ii]
             else:
+                #print("x", x.dtype)
+                #print("self.rescale", type(self.rescale), self.rescale)
                 x *= self.rescale
         # x is a single image, so it doesn't have image number at index 0
         img_channel_axis = self.channel_axis - 1
@@ -1379,8 +1417,8 @@ class PatchIterator(Iterator):
         self._reflect = self.mode == 'reflect'
         self.augmentation = augmentation
         self.image_data_generator = image_data_generator
-        self.transforms = []
         self.output_indices = output_indices
+        self.transforms = []
         if self.image_data_generator is not None:
             self.transforms.append( self.image_data_generator.random_transform )
             self.transforms.append( self.image_data_generator.standardize )
@@ -1510,3 +1548,121 @@ class PatchIterator(Iterator):
         # The transformation of images is not under thread lock
         # so it can be done in parallel
         return self._get_batches_of_transformed_samples(index_array)#import threading
+
+class MemMapDataset():
+    def __init__(self, root_dir, csv_file, 
+                 classes = ["Control", "Case",],
+                 binary=True,
+                 transform=None,
+                 nsamples = None):
+        import pandas as pd
+        self.transform = transform
+        self.table = pd.read_csv(csv_file)
+        if nsamples:
+            self.table = self.table[:nsamples]
+        self.root_dir = root_dir
+        self.classes = classes
+        if len(classes) in (1,2) and binary:
+            self.onehot = np.stack([(self.table["label"] == cc).values for cc in classes[:1]], axis=-1)
+        else:
+            self.onehot = np.stack([(self.table["label"] == cc).values for cc in classes], axis=-1)
+
+    def __len__(self):
+        return len(self.table)
+    
+    def __getitem__(self, idx):
+        item = self.table.iloc[idx]
+        
+        img_name = os.path.join(self.root_dir,
+                                item['filename'])
+        
+        image = open_memmap(img_name, mode='r')
+        label = self.onehot[idx]
+
+        if self.transform:
+            sample = self.transform([image, label])
+        else:
+            sample = [image, label]
+
+        return sample
+
+class MemMapIterator(Iterator):
+    def __init__(self, root_dir, csv_file,
+                 classes = ["Control", "Case",],
+                 image_data_generator = None,
+                 binary=True,
+                 transform=None,
+                 nsamples = None,
+                 batch_size = 1,
+                 shuffle = False,
+                 seed = None,
+                 postprocessing_function=None,
+                 stratify=None,
+                 oversampling=True,
+                 subsample_factor=None,
+                 subsample_num=None,
+                 batch_rate=1,
+                 dtype = K.floatx(),
+                 color_mode=None,
+                 data_format = 'channels_last',
+                 ):
+        channels_axis = 3 if data_format == 'channels_last' else 1
+        self.channels_axis = channels_axis
+        self.dtype = dtype
+        self.color_mode=color_mode
+        #self.image_data_generator = image_data_generator
+        self.transforms = []
+        if image_data_generator is not None:
+            self.transforms.append( image_data_generator.random_transform )
+            self.transforms.append( image_data_generator.standardize )
+
+        self.dataset = MemMapDataset(root_dir, csv_file, classes=classes, binary=binary,
+                    transform=transform, nsamples=nsamples)
+
+        super(MemMapIterator, self).__init__(len(self.dataset), batch_size, shuffle, seed,
+                                                 stratify=stratify, oversampling=oversampling,
+                                                 subsample_factor=subsample_factor,
+                                                 subsample_num=subsample_num,
+                                                 postprocessing_function=postprocessing_function
+                                                )
+
+    def _get_batches_of_transformed_samples(self, index_array):
+        batch_x = np.zeros(tuple([len(index_array)] + list(self.dataset[0][0].shape)),
+                           dtype=self.dtype)
+        if len(batch_x.shape)==3:
+            batch_x = batch_x.reshape(batch_x.shape + (1,))
+        for i, j in enumerate(index_array):
+            x = self.dataset[j][0]
+            if len(x.shape)==2:
+                x = x.reshape(x.shape + (1,))
+            x = x.astype(self.dtype)
+            for tt in self.transforms:
+                x = tt(x)
+            batch_x[i] = x
+        if self.color_mode in (3,'rgb'):
+            if len(batch_x.shape)==3:
+                batch_x = np.stack([ batch_x ]*3, axis=-1)
+            if batch_x.shape[self.channels_axis]==1:
+                batch_x = np.concatenate([ batch_x ]*3, axis=3)
+            #print("batch_x", batch_x.shape)
+            #raise Exception("test!!!")
+        if self.postprocessing_function is not None:
+            batch_x = self.postprocessing_function(batch_x)
+        if len(self.dataset[0])==1:
+            return batch_x
+        batch_y = np.asarray([self.dataset[j][1] for j in index_array])
+        return batch_x, batch_y
+
+    def next(self):
+        """For python 2.x.
+
+        # Returns
+            The next batch.
+        """
+        # Keeps under lock only the mechanism which advances
+        # the indexing of each batch.
+        with self.lock:
+            index_array = next(self.index_generator)
+        # The transformation of images is not under thread lock
+        # so it can be done in parallel
+        return self._get_batches_of_transformed_samples(index_array)
