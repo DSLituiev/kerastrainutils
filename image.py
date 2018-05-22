@@ -1023,20 +1023,8 @@ class Iterator(Sequence):
             if self.batch_index == 0:
                 self._set_index_array()
 
-            print("batch_index", self.batch_index)
-            print("final_num", self.final_num)
-            print("_batch_size", _batch_size)
             self.batch_index = self.total_batches_seen % self.__len__()
             current_index = (self.batch_index * _batch_size) % self.final_num
-#            if self.n > current_index + self.batch_size:
-#                self.batch_index += 1
-#            else:
-#                self.batch_index = 0
-#                print("new epoch")
-#            
-#            self.batch_index = self.total_batches_seen % self.__len__()
-            print("batch_index", self.batch_index)
-            print("current_index", current_index)
             self.total_batches_seen += 1
             yield self.index_array[current_index:
                                    current_index + _batch_size]
