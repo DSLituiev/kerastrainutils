@@ -1834,7 +1834,9 @@ class MemMapCocoIterator(Iterator):
                  dtype = K.floatx(),
                  color_mode=None,
                  data_format = 'channels_last',
+                 output_indices = False,
                  ):
+        self.output_indices = output_indices
         channels_axis = 3 if data_format == 'channels_last' else 1
         self.channels_axis = channels_axis
         self.dtype = dtype
@@ -1868,6 +1870,8 @@ class MemMapCocoIterator(Iterator):
                                                 )
 
     def _get_batches_of_transformed_samples(self, index_array):
+        #import ipdb
+        #ipdb.set_trace()
         batch_x = np.zeros(tuple([len(index_array)] + list(self.dataset[0][0].shape)),
                            dtype=self.dtype)
         batch_y = np.zeros(tuple([len(index_array)] + list(self.dataset[0][1].shape)),
@@ -1906,9 +1910,14 @@ class MemMapCocoIterator(Iterator):
             #raise Exception("test!!!")
         if self.postprocessing_function is not None:
             batch_x = self.postprocessing_function(batch_x)
-        if len(self.dataset[0])==1:
-            return batch_x
-        return batch_x, batch_y
+        if self.output_indices:
+            if len(self.dataset[0])==1:
+                return batch_x, index_array
+            return batch_x, batch_y, index_array
+        else:
+            if len(self.dataset[0])==1:
+                return batch_x
+            return batch_x, batch_y
 
     def next(self):
         """For python 2.x.
