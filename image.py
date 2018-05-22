@@ -26,6 +26,8 @@ try:
 except ImportError:
     pil_image = None
 import cv2
+import json
+from pycocotools.mask import encode, decode
 
 
 def random_rotation(x, rg, row_axis=1, col_axis=2, channel_axis=0,
@@ -54,7 +56,7 @@ def random_rotation(x, rg, row_axis=1, col_axis=2, channel_axis=0,
 
     h, w = x.shape[row_axis], x.shape[col_axis]
     transform_matrix = transform_matrix_offset_center(rotation_matrix, h, w)
-    x = apply_transform(x, transform_matrix, channel_axis, fill_mode, cval)
+    x = apply_affine_transform(x, transform_matrix, channel_axis, fill_mode, cval)
     return x
 
 
@@ -86,7 +88,7 @@ def random_shift(x, wrg, hrg, row_axis=1, col_axis=2, channel_axis=0,
                                    [0, 0, 1]])
 
     transform_matrix = translation_matrix  # no need to do offset
-    x = apply_transform(x, transform_matrix, channel_axis, fill_mode, cval)
+    x = apply_affine_transform(x, transform_matrix, channel_axis, fill_mode, cval)
     return x
 
 
@@ -116,7 +118,7 @@ def random_shear(x, intensity, row_axis=1, col_axis=2, channel_axis=0,
 
     h, w = x.shape[row_axis], x.shape[col_axis]
     transform_matrix = transform_matrix_offset_center(shear_matrix, h, w)
-    x = apply_transform(x, transform_matrix, channel_axis, fill_mode, cval)
+    x = apply_affine_transform(x, transform_matrix, channel_axis, fill_mode, cval)
     return x
 
 
@@ -156,7 +158,7 @@ def random_zoom(x, zoom_range, row_axis=1, col_axis=2, channel_axis=0,
 
     h, w = x.shape[row_axis], x.shape[col_axis]
     transform_matrix = transform_matrix_offset_center(zoom_matrix, h, w)
-    x = apply_transform(x, transform_matrix, channel_axis, fill_mode, cval)
+    x = apply_affine_transform(x, transform_matrix, channel_axis, fill_mode, cval)
     return x
 
 
@@ -179,22 +181,39 @@ def transform_matrix_offset_center(matrix, x, y):
     return transform_matrix
 
 
-def apply_transform(x,
+def apply_affine_transform(x,
                     transform_matrix,
                     channel_axis=0,
                     fill_mode='nearest',
-                    cval=0.):
+                    cval=0.,
+                    borderMode = cv2.BORDER_TRANSPARENT,
+                    interp = cv2.INTER_NEAREST,
+                    use_opencv=False):
     """Apply the image transformation specified by a matrix.
 
     # Arguments
         x: 2D numpy array, single image.
         transform_matrix: Numpy array specifying the geometric transformation.
         channel_axis: Index of axis for channels in the input tensor.
+        use_opencv: 
         fill_mode: Points outside the boundaries of the input
             are filled according to the given mode
             (one of `{'constant', 'nearest', 'reflect', 'wrap'}`).
         cval: Value used for points outside the boundaries
             of the input if `mode='constant'`.
+        borderMode:
+            cv2.BORDER_TRANSPARENT
+            cv2.BORDER_CONSTANT
+            BORDER_REPLICATE
+            BORDER_REFLECT
+            BORDER_REFLECT101
+            BORDER_WRAP
+        interp: 
+            cv2.INTER_NEAREST
+            cv2.INTER_LINEAR
+            cv2.INTER_AREA
+            cv2.INTER_CUBIC
+            cv2.INTER_LANCZOS4
 
     # Returns
         The transformed version of the input.
@@ -202,7 +221,21 @@ def apply_transform(x,
     final_affine_matrix = transform_matrix[:2, :2]
     final_offset = transform_matrix[:2, 2]
 
-    if len(x.shape)>2 and channel_axis is not None:
+    if use_opencv:
+        dsize=x.shape[:2]
+        init_shape = x.shape
+        #dest = np.ones_like(x) * cval
+        x = cv2.warpAffine(x, transform_matrix[:2,:],
+                           dsize,
+                           #dest,
+                           borderValue=cval,
+                           borderMode = borderMode,
+                           flags=interp,
+                           )
+        if len(x.shape) < len(init_shape):
+            x = x[..., np.newaxis]
+        #x = dest 
+    elif len(x.shape)>2 and channel_axis is not None:
         x = np.rollaxis(x, channel_axis, 0)
         channel_images = [ndi.interpolation.affine_transform(
             x_channel,
@@ -211,6 +244,7 @@ def apply_transform(x,
             order=0,
             mode=fill_mode,
             cval=cval) for x_channel in x]
+
         x = np.stack(channel_images, axis=0)
         x = np.rollaxis(x, 0, channel_axis + 1)
     else:
@@ -720,7 +754,36 @@ class ImageDataGenerator(object):
             transform_matrix = transform_matrix_offset_center(transform_matrix, nrows, ncols)
         return transform_matrix
 
-    def random_transform(self, x, seed=None):
+    def get_random_transform_specs(self, x, seed=None):
+        # x is a single image, so it doesn't have image number at index 0
+        img_row_axis = self.row_axis - 1
+        img_col_axis = self.col_axis - 1
+        img_channel_axis = self.channel_axis - 1
+        nrows = x.shape[img_row_axis]
+        ncols = x.shape[img_col_axis]
+
+        transform_matrix = self.get_geom_transform(nrows, ncols, seed=seed)
+        if self.horizontal_flip:
+            horizontal_flip = np.random.random() < 0.5
+        else:
+            horizontal_flip = False
+
+        if self.vertical_flip:
+            vertical_flip = np.random.random() < 0.5
+        else:
+            vertical_flip = False
+        return [transform_matrix, horizontal_flip, vertical_flip]
+       
+
+    def random_transform(self, x, seed=None, fill_mode=None, cval=None,
+                         borderMode = cv2.BORDER_TRANSPARENT,
+                         interp = cv2.INTER_NEAREST,
+                         use_opencv=False):
+        """fill_mode and cval can be supplied to the function directly"""
+        if fill_mode is None:
+            fill_mode = self.fill_mode
+        if cval is None:
+            cval = self.cval
 
         # x is a single image, so it doesn't have image number at index 0
         img_row_axis = self.row_axis - 1
@@ -732,8 +795,11 @@ class ImageDataGenerator(object):
         transform_matrix = self.get_geom_transform(nrows, ncols, seed=seed)
         
         if transform_matrix is not None:
-            x = apply_transform(x, transform_matrix, img_channel_axis,
-                                fill_mode=self.fill_mode, cval=self.cval)
+            x = apply_affine_transform(x, transform_matrix, img_channel_axis,
+                                fill_mode=fill_mode, cval=cval,
+                                borderMode = borderMode,
+                                interp = interp,
+                                use_opencv=use_opencv)
         if self.channel_shift_range != 0:
             x = random_channel_shift(x,
                                      self.channel_shift_range,
@@ -745,8 +811,30 @@ class ImageDataGenerator(object):
         if self.vertical_flip:
             if np.random.random() < 0.5:
                 x = flip_axis(x, img_row_axis)
-
         return x
+
+    def apply_transform(self, x, transform_matrix, horizontal_flip, vertical_flip,
+                         fill_mode=None, cval=None,
+                         borderMode = cv2.BORDER_TRANSPARENT,
+                         interp = cv2.INTER_NEAREST,
+                         use_opencv=False,
+                         **kwargs):
+        img_channel_axis = self.channel_axis - 1
+        img_row_axis = self.row_axis - 1
+        img_col_axis = self.col_axis - 1
+        if transform_matrix is not None:
+            x = apply_affine_transform(x, transform_matrix, img_channel_axis,
+                                fill_mode=fill_mode, cval=cval,
+                                borderMode = borderMode,
+                                interp = interp,
+                                use_opencv=use_opencv)
+        if horizontal_flip:
+            x = flip_axis(x, img_col_axis)
+
+        if vertical_flip:
+            x = flip_axis(x, img_row_axis)
+        return x
+        
 
     def fit(self, x,
             augment=False,
@@ -1651,6 +1739,175 @@ class MemMapIterator(Iterator):
         if len(self.dataset[0])==1:
             return batch_x
         batch_y = np.asarray([self.dataset[j][1] for j in index_array])
+        return batch_x, batch_y
+
+    def next(self):
+        """For python 2.x.
+
+        # Returns
+            The next batch.
+        """
+        # Keeps under lock only the mechanism which advances
+        # the indexing of each batch.
+        with self.lock:
+            index_array = next(self.index_generator)
+        # The transformation of images is not under thread lock
+        # so it can be done in parallel
+        return self._get_batches_of_transformed_samples(index_array)
+
+
+def read_decode_coco(fname):
+    with open(fname) as fh:
+        coco = json.load(fh)
+    return decode(coco)
+
+class MemMapCocoDataset():
+    def __init__(self, root_dir, csv_file, 
+                 binary=True,
+                 transform=None,
+                 nsamples = None,
+                 mmapcol = 'memmap',
+                 cococol = 'coco',
+                 ):
+        import pandas as pd
+        self.transform = transform
+        self.table = pd.read_csv(csv_file)
+        if nsamples:
+            self.table = self.table[:nsamples]
+        self.root_dir = root_dir
+        self.mmapcol = mmapcol
+        self.cococol = cococol
+
+    def __len__(self):
+        return len(self.table)
+    
+    def __getitem__(self, idx):
+        item = self.table.iloc[idx]
+        
+        img_name = os.path.join(self.root_dir,
+                                item[self.mmapcol])
+        image = open_memmap(img_name, mode='r')
+
+        coco_name = os.path.join(self.root_dir,
+                                item[self.cococol])
+        label = read_decode_coco(coco_name)
+
+        if self.transform:
+            sample = self.transform([image, label])
+        else:
+            sample = [image, label]
+
+        return sample
+
+from croppad import crop_pad_center
+
+def resize_inputs(xx, yy,
+                mode='constant',
+                target_size = [512, 512],
+                constant_values_x = 255,
+                constant_values_y = 0,
+              ):
+    xx = (crop_pad_center(xx, target_size, pad_mode=mode, constant_values=constant_values_x))
+    yy = (crop_pad_center(yy, target_size, pad_mode=mode, constant_values=constant_values_y))
+    if len(yy.shape) == 2:
+        yy= yy[..., np.newaxis]
+    return xx, yy
+
+class MemMapCocoIterator(Iterator):
+    def __init__(self, root_dir, csv_file,
+                 image_data_generator = None,
+                 binary=True,
+                 mode='constant',
+                 target_size = [512, 512],
+                 constant_values_x = 255,
+                 constant_values_y = 0,
+                 nsamples = None,
+                 batch_size = 1,
+                 shuffle = False,
+                 seed = None,
+                 postprocessing_function=None,
+                 stratify=None,
+                 oversampling=True,
+                 subsample_factor=None,
+                 subsample_num=None,
+                 batch_rate=1,
+                 dtype = K.floatx(),
+                 color_mode=None,
+                 data_format = 'channels_last',
+                 ):
+        channels_axis = 3 if data_format == 'channels_last' else 1
+        self.channels_axis = channels_axis
+        self.dtype = dtype
+        self.color_mode=color_mode
+        #self.image_data_generator = image_data_generator
+        #self.transforms = []
+        if image_data_generator is not None:
+            self.get_random_transform_specs = image_data_generator.get_random_transform_specs
+            self.apply_geom_transform = image_data_generator.apply_transform
+            self.intensity_transform = image_data_generator.standardize
+            #self.transforms.append( image_data_generator.random_transform )
+            #self.transforms.append( image_data_generator.standardize )
+        if target_size is not None:
+            transform = lambda x : resize_inputs(x[0], x[1],
+                                                 mode=mode,
+                                                 target_size = target_size,
+                                                 constant_values_x = constant_values_x,
+                                                 constant_values_y = constant_values_y,
+                                                 )
+        self.constant_values_x = constant_values_x 
+        self.constant_values_y = constant_values_y
+        
+        self.dataset = MemMapCocoDataset(root_dir, csv_file, binary=binary,
+                                         transform=transform, nsamples=nsamples)
+
+        super(MemMapCocoIterator, self).__init__(len(self.dataset), batch_size, shuffle, seed,
+                                                 stratify=stratify, oversampling=oversampling,
+                                                 subsample_factor=subsample_factor,
+                                                 subsample_num=subsample_num,
+                                                 postprocessing_function=postprocessing_function
+                                                )
+
+    def _get_batches_of_transformed_samples(self, index_array):
+        batch_x = np.zeros(tuple([len(index_array)] + list(self.dataset[0][0].shape)),
+                           dtype=self.dtype)
+        batch_y = np.zeros(tuple([len(index_array)] + list(self.dataset[0][1].shape)),
+                           dtype=self.dtype)
+        if len(batch_x.shape)==3:
+            batch_x = batch_x.reshape(batch_x.shape + (1,))
+        for i, j in enumerate(index_array):
+            x, y = self.dataset[j]
+            if len(x.shape)==2:
+                x = x.reshape(x.shape + (1,))
+            
+            if hasattr(self, 'get_random_transform_specs'):
+                transform_matrix, horizontal_flip, vertical_flip = self.get_random_transform_specs(x)
+                x = self.apply_geom_transform(x, transform_matrix, horizontal_flip, vertical_flip,
+                                        interp=cv2.INTER_CUBIC,
+                                        #interp=cv2.INTER_NEAREST,
+                                        borderMode = cv2.BORDER_CONSTANT,
+                                        cval = [self.constant_values_x] *3,
+                                        use_opencv=True)
+                y = self.apply_geom_transform(y, transform_matrix, horizontal_flip, vertical_flip,
+                                              interp=cv2.INTER_NEAREST,
+                                              borderMode = cv2.BORDER_CONSTANT,
+                                              cval=self.constant_values_y,
+                                              use_opencv=True)
+            if hasattr(self, 'intensity_transform'):
+                x = self.intensity_transform(x)
+            x = x.astype(self.dtype)
+            batch_x[i] = x
+            batch_y[i] = y
+        if self.color_mode in (3,'rgb'):
+            if len(batch_x.shape)==3:
+                batch_x = np.stack([ batch_x ]*3, axis=-1)
+            if batch_x.shape[self.channels_axis]==1:
+                batch_x = np.concatenate([ batch_x ]*3, axis=3)
+            #print("batch_x", batch_x.shape)
+            #raise Exception("test!!!")
+        if self.postprocessing_function is not None:
+            batch_x = self.postprocessing_function(batch_x)
+        if len(self.dataset[0])==1:
+            return batch_x
         return batch_x, batch_y
 
     def next(self):
