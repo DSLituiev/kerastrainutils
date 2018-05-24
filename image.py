@@ -20,7 +20,7 @@ from functools import partial
 from keras import backend as K
 from keras.utils.data_utils import Sequence
 
-from histeq import histeq
+from histeq import histeq, ztransform
 try:
     from PIL import Image as pil_image
 except ImportError:
@@ -453,6 +453,11 @@ class ImageDataGenerator(object):
                  preprocessing_function=None,
                  postprocessing_function=None,
                  histeq_alpha = False,
+                 contrast_exp = 1.2,
+                 contrast = None,
+                 truncate_quantile = None,
+                 z_transform = None,
+                 #noise=None
                  data_format=None):
         if data_format is None:
             data_format = K.image_data_format()
@@ -473,7 +478,14 @@ class ImageDataGenerator(object):
         self.horizontal_flip = horizontal_flip
         self.vertical_flip = vertical_flip
         self.rescale = rescale
+
         self.histeq_alpha = histeq_alpha
+        self.contrast = contrast
+        self.contrast_exp = contrast_exp
+        self.ztransform = z_transform
+        self.truncate_quantile = truncate_quantile
+
+        #self.noise_specs = {} if noise is None else noise
         #self.intensity_gain = intensity_gain
 
         self.preprocessing_function = preprocessing_function
@@ -637,6 +649,16 @@ class ImageDataGenerator(object):
                         x[:,:,ii] = histeq(x[:,:,ii], bitdepth=16, mask=None, alpha=alpha)
             else:
                 x = histeq(x, bitdepth=16, mask=None, alpha=alpha)
+        if self.ztransform:
+            mask = x>0
+            mask &= x<x.max()
+            if self.contrast_range:
+                contrast = np.clip(self.contrast_exp ** np.random.normal(0,1),
+                                   *self.contrast_range)
+            else:
+                contrast = None
+            x = ztransform(x, mask=None, contrast=contrast,
+                           truncate_quantile=self.truncate_quantile)
         if self.preprocessing_function:
             x = self.preprocessing_function(x)
         if self.rescale is not None:
