@@ -399,7 +399,8 @@ class ModelCheckpoint(Callback):
                  mode='auto', period=1, median_kernel=None,
                  period_=None,
                  individual_epochs=None,
-                 predict = None):
+                 predict = None,
+                 model=None):
         super(ModelCheckpoint, self).__init__()
         self.monitor = monitor
         self.predict = predict
@@ -416,6 +417,7 @@ class ModelCheckpoint(Callback):
         #self.metric_q = Queue(maxsize=median_kernel)
         self.metric_q = np.nan*np.ones( median_kernel )
         self._qindex = 0
+        self.model_to_save = model
 
         if mode not in ['auto', 'min', 'max']:
             warnings.warn('ModelCheckpoint mode %s is unknown, '
@@ -441,7 +443,8 @@ class ModelCheckpoint(Callback):
         if self.predict and ("save" in self.predict) and ("data" in self.predict):
             prediction = self.model.predict(self.predict["data"])
             self.predict["save"](prediction, epoch)
-
+        if self.model_to_save is None:
+            self.model_to_save = self.model
         if self.save_weights_only:
             self.model.save_weights(filepath, overwrite=True)
         else:
@@ -1237,7 +1240,7 @@ class CSVWallClockLogger(Callback):
             training). False: overwrite existing file,
     """
 
-    def __init__(self, filename, separator=',', append=False, compute_auc=False):
+    def __init__(self, filename, separator=',', append=False, compute_auc=False, model=None):
         self.compute_auc = compute_auc
         self._prev_time_ = time.time()
         self.sep = separator
@@ -1246,6 +1249,7 @@ class CSVWallClockLogger(Callback):
         self.writer = None
         self.keys = None
         self.append_header = True
+        self.model_to_save = model
         self.file_flags = 'b' if six.PY2 and os.name == 'nt' else ''
         super(CSVWallClockLogger, self).__init__()
 
