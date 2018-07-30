@@ -27,6 +27,13 @@ from keras import backend as K
 #from model_surgery import capture_summary
 import tensorflow as tf
 
+def weighted_binary_crossentropy(y_true, y_pred, weight=0.5):
+    bxe = K.binary_crossentropy(y_pred, y_true)
+    weight_vector = y_true * weight + (1. - y_true) * (1 - weight)
+    weight_vector = weight_vector / K.sum(weight_vector)
+    wbxe = weight_vector * bxe
+    return K.mean( wbxe, axis=1)
+
 def w_categorical_crossentropy(weights):
     def _w_categorical_crossentropy(y_true, y_pred, weights):
         nb_cl = len(weights)
