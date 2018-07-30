@@ -27,6 +27,7 @@ except ImportError:
     pil_image = None
 import cv2
 import json
+from croppad import crop_pad_center
 from pycocotools.mask import encode, decode
 
 
@@ -652,9 +653,9 @@ class ImageDataGenerator(object):
         if self.ztransform:
             mask = x>0
             mask &= x<x.max()
-            if self.contrast_range:
+            if self.contrast is not None:
                 contrast = np.clip(self.contrast_exp ** np.random.normal(0,1),
-                                   *self.contrast_range)
+                                   *self.contrast)
             else:
                 contrast = None
             x = ztransform(x, mask=None, contrast=contrast,
@@ -1816,15 +1817,17 @@ class MemMapCocoDataset():
 
         return sample
 
-from croppad import crop_pad_center
 
 def resize_inputs(xx, yy,
                 mode='constant',
                 target_size = [512, 512],
                 constant_values_x = 255,
                 constant_values_y = 0,
+                add_const_to_label = 0,
               ):
     xx = (crop_pad_center(xx, target_size, pad_mode=mode, constant_values=constant_values_x))
+    if add_const_to_label>0:
+        yy += add_const_to_label
     yy = (crop_pad_center(yy, target_size, pad_mode=mode, constant_values=constant_values_y))
     if len(yy.shape) == 2:
         yy= yy[..., np.newaxis]
@@ -1852,6 +1855,7 @@ class MemMapCocoIterator(Iterator):
                  color_mode=None,
                  data_format = 'channels_last',
                  output_indices = False,
+                 add_const_to_label=0,
                  ):
         self.output_indices = output_indices
         channels_axis = 3 if data_format == 'channels_last' else 1
@@ -1872,6 +1876,7 @@ class MemMapCocoIterator(Iterator):
                                                  target_size = target_size,
                                                  constant_values_x = constant_values_x,
                                                  constant_values_y = constant_values_y,
+                                                 add_const_to_label=add_const_to_label,
                                                  )
         self.constant_values_x = constant_values_x 
         self.constant_values_y = constant_values_y
