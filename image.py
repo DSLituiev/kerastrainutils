@@ -16,6 +16,7 @@ import threading
 import warnings
 import multiprocessing.pool
 from functools import partial
+from collections import Counter
 
 from keras import backend as K
 from keras.utils.data_utils import Sequence
@@ -607,12 +608,15 @@ class ImageDataGenerator(object):
                     seed = None,
                     postprocessing_function=None,
                     stratify=None,
-                    oversampling=True,
+                    oversampling=False,
                     subsample_factor=None,
                     subsample_num=None,
                     batch_rate=1,
                     dtype = K.floatx(),
                     color_mode=None,
+                    label_col = "label",
+                    filename_col = "filename",
+                    encode_label=None,
                     ):
         return MemMapIterator(root_dir, csv_file,
                  classes = classes,
@@ -631,6 +635,9 @@ class ImageDataGenerator(object):
                  batch_rate=batch_rate,
                  dtype = dtype,
                  color_mode=color_mode,
+                 label_col = label_col,
+                 filename_col = filename_col,
+                 encode_label=encode_label,
                  )
     def standardize(self, x):
         """Apply the normalization configuration to a batch of inputs.
@@ -961,7 +968,7 @@ class Iterator(Sequence):
         if self.stratify is not None:
             self._prep_stratified()
             if self.oversampling:
-                self.final_num = sum(self.class_size>0) * max(self.class_size)
+                self.final_num = sum(np.asarray(list(self.class_size.values()))>0) * max(self.class_size.values())
         elif (subsample_factor is not None) or (subsample_num is not None):
             if subsample_num is None:
                 self.final_num = int(self.n/subsample_factor)
@@ -974,23 +981,27 @@ class Iterator(Sequence):
 
     def _prep_stratified(self):
         self.uniq_classes = np.unique(self.stratify)
-        self.class_size = np.bincount(self.stratify)
+        #self.class_size = np.bincount(self.stratify)
+        self.class_size = Counter(self.stratify)
         
         self.class_inds = {}
         for cc in self.uniq_classes:
-            mask = self.stratify == cc
+            mask = np.asarray(self.stratify) == cc
             self.class_inds[cc] = np.where(mask)[0]
 
-        ex_per_class = max(self.class_size)
+        #ex_per_class = max(self.class_size)
+        ex_per_class = max(self.class_size.values())
         self.orig_index_array = []
-        for cc,ss in enumerate(self.class_size):
-                if ss==0:
-                    continue
-                self.orig_index_array.append(
-                    np.random.choice(self.class_inds[cc],
-                                    size=ex_per_class,
-                                    replace=ss<ex_per_class)
-                                )
+        #for cc,ss in enumerate(self.class_size):
+        for cc in self.uniq_classes:
+            ss = self.class_size[cc]
+            if ss==0:
+                continue
+            self.orig_index_array.append(
+                np.random.choice(self.class_inds[cc],
+                                size=ex_per_class,
+                                replace=ss<ex_per_class)
+                            )
 #         np.random.permutation(self.n)
         self.orig_index_array = np.stack(self.orig_index_array).T.ravel()
             
@@ -1134,7 +1145,7 @@ class NumpyArrayIterator(Iterator):
 
     def _get_batches_of_transformed_samples(self, index_array):
         print("self.batch_index", self.batch_index,)
-        print("===", index_array)
+        print("==", index_array)
         batch_x = np.zeros(tuple([len(index_array)] + list(self.x.shape)[1:]),
                            dtype=K.floatx())
         if len(batch_x.shape)==3:
@@ -1377,7 +1388,8 @@ class DirectoryIterator(Iterator):
         pool.close()
         pool.join()
         super(DirectoryIterator, self).__init__(self.samples, batch_size, shuffle, seed, 
-                stratify=self.classes if stratify else None, oversampling=oversampling,
+                stratify=self.classes if stratify else None,
+                oversampling=oversampling,
                 subsample_factor=subsample_factor,
                 subsample_num=subsample_num,
                 postprocessing_function=postprocessing_function)
@@ -1658,29 +1670,52 @@ class PatchIterator(Iterator):
 class MemMapDataset():
     def __init__(self, root_dir, csv_file, 
                  classes = ["Control", "Case",],
+                 label_col = "label",
+                 filename_col = "filename",
                  binary=True,
                  transform=None,
-                 nsamples = None):
+                 nsamples = None,
+                 encode_label = None):
         import pandas as pd
         self.transform = transform
+        self.csv_file = csv_file
         self.table = pd.read_csv(csv_file)
         if nsamples:
             self.table = self.table[:nsamples]
+        self.filenames = self.table[filename_col].tolist()
+        self.classes = self.table[label_col].tolist()
         self.root_dir = root_dir
-        self.classes = classes
-        if len(classes) in (1,2) and binary:
-            self.onehot = np.stack([(self.table["label"] == cc).values for cc in classes[:1]], axis=-1)
+        self.label_col = label_col
+        self.filename_col = filename_col
+        for cc in classes:
+            if cc not in self.classes:
+                print("class is missing in data: %s" % cc)
+        #classes = np.unique(self.classes).tolist()
+        self.class_set = classes
+        if encode_label is None:
+            if len(classes) in (1,2) and binary:
+                self.onehot = MemMapDataset.encode_label_binary(self.table[label_col], self.class_set)
+            else:
+                self.onehot = MemMapDataset.encode_label_onehot(self.table[label_col], self.class_set)
         else:
-            self.onehot = np.stack([(self.table["label"] == cc).values for cc in classes], axis=-1)
+            self.onehot = encode_label(self.table[label_col], self.class_set)
+
+    @staticmethod
+    def encode_label_binary(labelvector, class_set):
+        onehot = np.stack([(labelvector == cc).values for cc in class_set[1:]], axis=-1)
+        return onehot
+        
+    @staticmethod
+    def encode_label_onehot(labelvector, class_set):
+        onehot = np.stack([(labelvector == cc).values for cc in class_set], axis=-1)
+        return onehot
 
     def __len__(self):
         return len(self.table)
     
     def __getitem__(self, idx):
         item = self.table.iloc[idx]
-        
-        img_name = os.path.join(self.root_dir,
-                                item['filename'])
+        img_name = os.path.join(self.root_dir, item[self.filename_col])
         
         image = open_memmap(img_name, mode='r')
         label = self.onehot[idx]
@@ -1711,6 +1746,9 @@ class MemMapIterator(Iterator):
                  dtype = K.floatx(),
                  color_mode=None,
                  data_format = 'channels_last',
+                 label_col = "label",
+                 filename_col = "filename",
+                 encode_label=None,
                  ):
         channels_axis = 3 if data_format == 'channels_last' else 1
         self.channels_axis = channels_axis
@@ -1723,16 +1761,24 @@ class MemMapIterator(Iterator):
             self.transforms.append( image_data_generator.standardize )
 
         self.dataset = MemMapDataset(root_dir, csv_file, classes=classes, binary=binary,
-                    transform=transform, nsamples=nsamples)
+                                     transform=transform, nsamples=nsamples,
+                                     label_col = label_col,
+                                     filename_col = filename_col,
+                                     encode_label=encode_label,
+                                     )
+        self.classes = self.dataset.classes
+        self.filenames = self.dataset.filenames
 
         super(MemMapIterator, self).__init__(len(self.dataset), batch_size, shuffle, seed,
-                                                 stratify=stratify, oversampling=oversampling,
-                                                 subsample_factor=subsample_factor,
-                                                 subsample_num=subsample_num,
-                                                 postprocessing_function=postprocessing_function
+                                             stratify=self.classes if stratify else None,
+                                             oversampling=oversampling,
+                                             subsample_factor=subsample_factor,
+                                             subsample_num=subsample_num,
+                                             postprocessing_function=postprocessing_function,
                                                 )
 
     def _get_batches_of_transformed_samples(self, index_array):
+        print("index_array", index_array)
         batch_x = np.zeros(tuple([len(index_array)] + list(self.dataset[0][0].shape)),
                            dtype=self.dtype)
         if len(batch_x.shape)==3:
