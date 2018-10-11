@@ -23,10 +23,40 @@ from keras.utils.data_utils import Sequence
 
 from histeq import histeq, ztransform
 try:
+    from PIL import ImageEnhance
     from PIL import Image as pil_image
 except ImportError:
     pil_image = None
+
+if pil_image is not None:
+    _PIL_INTERPOLATION_METHODS = {
+        'nearest': pil_image.NEAREST,
+        'bilinear': pil_image.BILINEAR,
+        'bicubic': pil_image.BICUBIC,
+    }
+    # These methods were only introduced in version 3.4.0 (2016).
+    if hasattr(pil_image, 'HAMMING'):
+        _PIL_INTERPOLATION_METHODS['hamming'] = pil_image.HAMMING
+    if hasattr(pil_image, 'BOX'):
+        _PIL_INTERPOLATION_METHODS['box'] = pil_image.BOX
+    # This method is new in version 1.1.3 (2013).
+    if hasattr(pil_image, 'LANCZOS'):
+        _PIL_INTERPOLATION_METHODS['lanczos'] = pil_image.LANCZOS
+
+
 import cv2
+
+_OPENCV_INTERPOLATION_METHODS = {
+    "nearest":cv2.INTER_NEAREST,
+    "bilinear":cv2.INTER_LINEAR,
+    "linear":cv2.INTER_LINEAR,
+    "area":cv2.INTER_AREA,
+    "bicubic":cv2.INTER_CUBIC,
+    "cubic":cv2.INTER_CUBIC,
+    "lanczos":cv2.INTER_LANCZOS4,
+    "lanczos4":cv2.INTER_LANCZOS4,
+}
+
 import json
 from croppad import crop_pad_center
 from pycocotools.mask import encode, decode
@@ -351,40 +381,213 @@ def img_to_array(img, data_format=None):
     return x
 
 
-def load_img(path, grayscale=False, target_size=None):
-    """Loads an image into PIL format.
-
-    # Arguments
-        path: Path to image file
-        grayscale: Boolean, whether to load the image as grayscale.
+def load_img(path, grayscale=False, color_mode='rgb', target_size=None,
+             interpolation='nearest', driver='opencv'):
+    """Loads an image using a defined module
+      # Arguments
+        path: Path to image file.
+        color_mode: One of "grayscale", "rbg", "rgba", "bgr", "bgra". Default: "rgb".
+            The desired image format.
         target_size: Either `None` (default to original size)
             or tuple of ints `(img_height, img_width)`.
+        interpolation: Interpolation method used to resample the image if the
+            target size is different from that of the loaded image.
+            Supported methods are "nearest", "bilinear", and "bicubic".
+            Driver-dependent options are "lanczos", "area", "box" and
+            "hamming". For details, refer to documentation of `load_img_pil()`
+            and `load_img_opencv()`. By default, "nearest" is used.
+    """
+    if driver.lower() in ('cv2','opencv'):
+        img = load_img_opencv(path, grayscale=grayscale, color_mode=color_mode,
+                              target_size=target_size, interpolation=interpolation)
+    elif driver.lower() in ('pil', 'pillow'):
+        img = load_img_pil(path, grayscale=grayscale, color_mode=color_mode, 
+                              target_size=target_size, interpolation=interpolation)
+    return img
+        
 
+def load_img_opencv(path, grayscale=False, color_mode='rgb', target_size=None,
+             interpolation='nearest'):
+    """Loads an image using opencv format.
+    # Arguments
+        path: Path to image file.
+        color_mode: One of "grayscale", "rbg", "rgba", "bgr", "bgra". Default: "rgb".
+            The desired image format.
+        target_size: Either `None` (default to original size)
+            or tuple of ints `(img_height, img_width)`.
+        interpolation: Interpolation method used to resample the image if the
+            target size is different from that of the loaded image.
+            Supported methods are "nearest", "bilinear", "bicubic", "lanczos", "area".
+            By default, "nearest" is used.
     # Returns
-        A PIL Image instance.
-
+        A numpy array instance.
     # Raises
         ImportError: if PIL is not available.
+        ValueError: if interpolation method is not supported.
     """
+    if grayscale is True:
+        warnings.warn('grayscale is deprecated. Please use '
+                      'color_mode = "grayscale"')
+        color_mode = 'grayscale'
+        
+    img = cv2.imread(path, cv2.IMREAD_ANYDEPTH)
+    
+    if len(img.shape)==2:
+        img_mode = 'grayscale'
+    elif len(img.shape) == 3:
+        if img.shape[-1]==3:
+            img_mode = 'bgr'
+        elif img.shape[-1]==4:
+            img_mode = 'bgra'
+
+    if img_mode != color_mode:
+        if color_mode.startswith('gray'):
+            if img_mode == 'bgr':
+                img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            elif img_mode == 'bgra':
+                img = cv2.cvtColor(img, cv2.COLOR_BGRA2GRAY)
+        elif color_mode == 'rgba':
+            if img_mode == 'bgr':
+                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGBA)
+            elif img_mode == 'grayscale':
+                img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGBA)
+        elif color_mode == 'rgb':
+            if img_mode == 'bgr':
+                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            elif img_mode == 'bgra':
+                img = cv2.cvtColor(img, cv2.COLOR_BGRA2RGB)
+            elif img_mode == 'grayscale':
+                img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+        else:
+            raise ValueError('color_mode must be "grayscale", "rbg", or "rgba"')
+            
+    if target_size is not None:
+        width_height_tuple = (target_size[1], target_size[0])
+        if img.shape[:2][::-1] != width_height_tuple:
+            if interpolation not in _PIL_INTERPOLATION_METHODS:
+                raise ValueError(
+                    'Invalid interpolation method {} specified. Supported '
+                    'methods are {}'.format(
+                        interpolation,
+                        ", ".join(_OPENCV_INTERPOLATION_METHODS.keys())))
+            resample = _OPENCV_INTERPOLATION_METHODS[interpolation]
+            img = cv2.resize(img, width_height_tuple, resample)
+    return img
+
+    
+def load_img_pil(path, grayscale=False, color_mode='rgb', target_size=None,
+             interpolation='nearest'):
+    """Loads an image into PIL format.
+    # Arguments
+        path: Path to image file.
+        color_mode: One of "grayscale", "rbg", "rgba". Default: "rgb".
+            The desired image format.
+        target_size: Either `None` (default to original size)
+            or tuple of ints `(img_height, img_width)`.
+        interpolation: Interpolation method used to resample the image if the
+            target size is different from that of the loaded image.
+            Supported methods are "nearest", "bilinear", and "bicubic".
+            If PIL version 1.1.3 or newer is installed, "lanczos" is also
+            supported. If PIL version 3.4.0 or newer is installed, "box" and
+            "hamming" are also supported. By default, "nearest" is used.
+    # Returns
+        A PIL Image instance.
+    # Raises
+        ImportError: if PIL is not available.
+        ValueError: if interpolation method is not supported.
+    """
+    if grayscale is True:
+        warnings.warn('grayscale is deprecated. Please use '
+                      'color_mode = "grayscale"')
+        color_mode = 'grayscale'
     if pil_image is None:
         raise ImportError('Could not import PIL.Image. '
                           'The use of `array_to_img` requires PIL.')
     img = pil_image.open(path)
-    if grayscale:
-        if img.mode != 'L':
+
+    if color_mode == 'grayscale':
+        if img.mode not in ('L', 'I;16'):
             img = img.convert('L')
-    else:
+    elif color_mode == 'rgba':
+        if img.mode != 'RGBA':
+            img = img.convert('RGBA')
+    elif color_mode == 'rgb':
         if img.mode != 'RGB':
-            img = img.convert('RGB')
-    if target_size:
-        hw_tuple = (target_size[1], target_size[0])
-        if img.size != hw_tuple:
-            try:
-                img = img.resize(hw_tuple)
-            except OSError as ee:
-                print("on resizing to %s\t%s" % (str(hw_tuple), path), file=sys.stderr)
-                raise ee
+            if img.mode not in ('I;16'):
+                img = img.convert('RGB')
+            else:
+                img = np.asarray(img)
+                img = img * (255.0/ max(1.0, img.max()))
+                img = np.stack([img.astype('uint8')]*3, axis=-1)
+                img = array_to_img(img)
+    else:
+        raise ValueError('color_mode must be "grayscale", "rbg", or "rgba"')
+    if target_size is not None:
+        width_height_tuple = (target_size[1], target_size[0])
+        if img.size != width_height_tuple:
+            if interpolation not in _PIL_INTERPOLATION_METHODS:
+                raise ValueError(
+                    'Invalid interpolation method {} specified. Supported '
+                    'methods are {}'.format(
+                        interpolation,
+                        ", ".join(_PIL_INTERPOLATION_METHODS.keys())))
+            resample = _PIL_INTERPOLATION_METHODS[interpolation]
+            img = img.resize(width_height_tuple, resample)
     return img
+
+
+def array_to_img(x, data_format=None, scale=True):
+    """Converts a 3D Numpy array to a PIL Image instance.
+    # Arguments
+        x: Input Numpy array.
+        data_format: Image data format.
+            either "channels_first" or "channels_last".
+        scale: Whether to rescale image values
+            to be within `[0, 255]`.
+    # Returns
+        A PIL Image instance.
+    # Raises
+        ImportError: if PIL is not available.
+        ValueError: if invalid `x` or `data_format` is passed.
+    """
+    if pil_image is None:
+        raise ImportError('Could not import PIL.Image. '
+                          'The use of `array_to_img` requires PIL.')
+    x = np.asarray(x, dtype=K.floatx())
+    if x.ndim != 3:
+        raise ValueError('Expected image array to have rank 3 (single image). '
+                         'Got array with shape:', x.shape)
+
+    if data_format is None:
+        data_format = K.image_data_format()
+    if data_format not in {'channels_first', 'channels_last'}:
+        raise ValueError('Invalid data_format:', data_format)
+
+    # Original Numpy array x has format (height, width, channel)
+    # or (channel, height, width)
+    # but target PIL image has format (width, height, channel)
+    if data_format == 'channels_first':
+        x = x.transpose(1, 2, 0)
+    if scale:
+        x = x + max(-np.min(x), 0)
+        x_max = np.max(x)
+        if x_max != 0:
+            x /= x_max
+        x *= 255
+    if x.shape[2] == 4:
+        # RGBA
+        return pil_image.fromarray(x.astype('uint8'), 'RGBA')
+    elif x.shape[2] == 3:
+        # RGB
+        return pil_image.fromarray(x.astype('uint8'), 'RGB')
+    elif x.shape[2] == 1:
+        # grayscale
+        if np.all(x < 255):
+            return pil_image.fromarray(x[:, :, 0].astype('uint8'), 'L')
+        else:
+            return pil_image.fromarray(x[:, :, 0].astype('uint16'), 'I;16')
+    else:
+        raise ValueError('Unsupported channel number: ', x.shape[2])
 
 
 def list_pictures(directory, ext='jpg|jpeg|bmp|png|ppm'):
@@ -1402,10 +1605,12 @@ class DirectoryIterator(Iterator):
         for i, j in enumerate(index_array):
             fname = self.filenames[j]
             batch_fn.append(fname)
+            
             img = load_img(os.path.join(self.directory, fname),
                            grayscale=grayscale,
                            target_size=self.target_size)
             x = img_to_array(img, data_format=self.data_format)
+            
             x = self.image_data_generator.random_transform(x)
             x = self.image_data_generator.standardize(x)
             batch_x[i] = x
